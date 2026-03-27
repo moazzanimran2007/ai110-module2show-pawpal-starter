@@ -1,4 +1,6 @@
 import streamlit as st
+from datetime import time
+from pawpal_system import ConstraintSet, Owner, PawPalAppController, Pet, TaskRepository, TimeWindow
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
 
@@ -42,6 +44,24 @@ st.subheader("Quick Demo Inputs (UI only)")
 owner_name = st.text_input("Owner name", value="Jordan")
 pet_name = st.text_input("Pet name", value="Mochi")
 species = st.selectbox("Species", ["dog", "cat", "other"])
+available_minutes = st.number_input(
+    "Owner available minutes today", min_value=30, max_value=720, value=180
+)
+
+st.markdown("### Scheduling Constraints")
+blocked_enabled = st.checkbox("Add blocked time window", value=False)
+col_b1, col_b2 = st.columns(2)
+with col_b1:
+    blocked_start = st.time_input("Blocked start", value=time(12, 0), key="blocked_start")
+with col_b2:
+    blocked_end = st.time_input("Blocked end", value=time(13, 0), key="blocked_end")
+
+preferred_categories_input = st.text_input(
+    "Preferred categories (comma-separated)", value="walk,feeding"
+)
+must_include_input = st.text_input(
+    "Must-include categories (comma-separated)", value="feeding,meds"
+)
 
 st.markdown("### Tasks")
 st.caption("Add a few tasks. In your final version, these should feed into your scheduler.")
@@ -56,11 +76,35 @@ with col2:
     duration = st.number_input("Duration (minutes)", min_value=1, max_value=240, value=20)
 with col3:
     priority = st.selectbox("Priority", ["low", "medium", "high"], index=2)
+col4, col5 = st.columns(2)
+with col4:
+    category = st.selectbox(
+        "Category",
+        ["walk", "feeding", "meds", "enrichment", "grooming", "other"],
+        index=0,
+    )
+with col5:
+    is_required = st.checkbox("Required task", value=False)
 
 if st.button("Add task"):
     st.session_state.tasks.append(
-        {"title": task_title, "duration_minutes": int(duration), "priority": priority}
+        {
+            "title": task_title.strip(),
+            "duration_minutes": int(duration),
+            "priority": priority,
+            "category": category,
+            "is_required": is_required,
+        }
     )
+
+if st.session_state.tasks:
+    remove_options = ["None"] + [t["title"] for t in st.session_state.tasks]
+    remove_selection = st.selectbox("Remove a task", remove_options)
+    if st.button("Remove selected task") and remove_selection != "None":
+        for idx, task in enumerate(st.session_state.tasks):
+            if task["title"] == remove_selection:
+                st.session_state.tasks.pop(idx)
+                break
 
 if st.session_state.tasks:
     st.write("Current tasks:")
@@ -74,15 +118,73 @@ st.subheader("Build Schedule")
 st.caption("This button should call your scheduling logic once you implement it.")
 
 if st.button("Generate schedule"):
-    st.warning(
-        "Not implemented yet. Next step: create your scheduling logic (classes/functions) and call it here."
+    owner = Owner(
+        owner_id="owner-1",
+        name=owner_name.strip() or "Owner",
+        available_minutes_per_day=int(available_minutes),
     )
-    st.markdown(
-        """
-Suggested approach:
-1. Design your UML (draft).
-2. Create class stubs (no logic).
-3. Implement scheduling behavior.
-4. Connect your scheduler here and display results.
-"""
+    owner.update_preferences(
+        {
+            "preferred_categories": [
+                c.strip() for c in preferred_categories_input.split(",") if c.strip()
+            ]
+        }
     )
+    pet = Pet(pet_id="pet-1", name=pet_name.strip() or "Pet", species=species)
+
+    repo = TaskRepository()
+    controller = PawPalAppController(owner=owner, pet=pet, task_repo=repo)
+
+    for task in st.session_state.tasks:
+        repo.add_task(
+            controller.new_task(
+                title=task["title"],
+                duration_minutes=task["duration_minutes"],
+                priority=task["priority"],
+                category=task["category"],
+                is_required=task["is_required"],
+            )
+        )
+
+    blocked_windows = []
+    if blocked_enabled and blocked_start < blocked_end:
+        blocked_windows.append(
+            TimeWindow(
+                start_time=blocked_start.strftime("%H:%M"),
+                end_time=blocked_end.strftime("%H:%M"),
+            )
+        )
+
+    constraints = ConstraintSet(
+        max_daily_minutes=int(available_minutes),
+        blocked_time_windows=blocked_windows,
+        must_include_categories=[c.strip() for c in must_include_input.split(",") if c.strip()],
+        preferred_categories=[c.strip() for c in preferred_categories_input.split(",") if c.strip()],
+    )
+    plan = controller.create_daily_plan(constraints)
+    explanation = controller.get_plan_explanation(plan, constraints)
+
+    if not plan.items:
+        st.warning("No tasks could be scheduled with the current constraints.")
+    else:
+        st.success("Schedule generated.")
+        st.table(
+            [
+                {
+                    "start": i.start_time,
+                    "end": i.end_time,
+                    "task": i.task.title,
+                    "category": i.task.category,
+                    "priority": i.task.priority,
+                    "reason": i.reason,
+                }
+                for i in plan.items
+            ]
+        )
+        st.caption(
+            f"Total minutes scheduled: {plan.total_minutes} | Remaining minutes: {plan.leftover_minutes}"
+        )
+
+    st.markdown("### Why this plan")
+    for line in explanation:
+        st.write(f"- {line}")
